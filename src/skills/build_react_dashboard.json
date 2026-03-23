@@ -1,0 +1,7 @@
+{
+  "name": "build react dashboard",
+  "task_pattern": "build react dashboard",
+  "file_plan": [],
+  "tool_usage": [],
+  "prompt_template": "Goal: build react dashboard\nUse similar workflow for tasks like this.\n"
+}

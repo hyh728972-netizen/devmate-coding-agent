@@ -1,0 +1,21 @@
+services:
+
+  mcp:
+    build: .
+    command: python -m devmate.mcp.server
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./config.toml:/app/config.toml
+
+  agent:
+    build: .
+    command: python main.py
+    depends_on:
+      - mcp
+    volumes:
+      - ./workspace:/app/workspace
+      - ./data:/app/data
+      - ./config.toml:/app/config.toml
+    stdin_open: true
+    tty: true
