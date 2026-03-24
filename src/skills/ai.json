@@ -1,0 +1,9 @@
+{
+  "name": "搜索最新ai趋势",
+  "task_pattern": "搜索最新ai趋势",
+  "file_plan": [],
+  "tool_usage": [
+    "SEARCH_WEB"
+  ],
+  "prompt_template": "Goal: 搜索最新ai趋势\nUse similar workflow for tasks like this.\n"
+}

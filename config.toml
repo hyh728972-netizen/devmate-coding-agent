@@ -12,6 +12,23 @@ tavily_api_key = "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"
 [langsmith]
 langchain_tracing_v2 = true
 langchain_api_key = "your_langchain_api_key_here"
+project = "devmate-agent"
 
 [skills]
 skills_dir = "./skills"
+persist_dir = "data/skills"
+
+[workspace]
+root = "workspace"
+auto_create = true
+
+[mcp]
+server_url = "http://127.0.0.1:8001"
+
+[agent]
+max_steps = 8
+planning_temperature = 0.2
+
+[rag]
+docs_dir = "docs"
+persist_dir = "data/chroma"

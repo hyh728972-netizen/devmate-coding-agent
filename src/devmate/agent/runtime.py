@@ -1,83 +1,173 @@
 import logging
 
-from langsmith import traceable
+from langchain_ollama import ChatOllama
 
 from devmate.agent.state import AgentState
-from devmate.agent.planner import plan_task
+from devmate.agent.router import route_intent
+from devmate.agent.planner import plan_next_step, generate_code_plan
 from devmate.agent.tools import (
     list_tree,
-    read_file,
+    write_file_tool,
     search_rag,
     search_web,
 )
 from devmate.config.settings import load_settings
 
-from devmate.skills.builder import build_skill_from_run
-from devmate.skills.retriever import find_similar_skill
-from devmate.skills.store import save_skill
-
 logger = logging.getLogger(__name__)
 
 
-@traceable(name="skill_recall")
-def traced_find_similar_skill(goal: str):
-    return find_similar_skill(goal)
+FILE_GEN_SYSTEM_PROMPT = """
+你是专业的软件工程师。
+
+你的任务是：
+根据用户需求和文件职责，生成某一个文件的完整可运行内容。
+
+要求：
+1. 只输出文件内容本身
+2. 不要输出 markdown 代码块
+3. 内容要尽量完整、可运行
+4. 保持工程化风格，避免无意义注释
+5. 如果是 HTML/CSS/JS，要生成合理页面
+6. 如果是 Python/FastAPI，要生成最小可运行版本
+"""
 
 
-@traceable(name="search_rag_tool")
-def traced_search_rag(query: str) -> str:
-    return search_rag(query)
+def _build_file_generation_prompt(
+    goal: str,
+    file_path: str,
+    file_description: str,
+    plan_summary: str,
+    workspace_tree: str,
+    rag_context: str,
+    web_context: str,
+) -> str:
+    return f"""
+用户总目标：
+{goal}
+
+当前计划摘要：
+{plan_summary}
+
+当前要生成的文件：
+{file_path}
+
+该文件职责：
+{file_description}
+
+当前工作区结构：
+{workspace_tree or "空"}
+
+本地知识：
+{rag_context or "无"}
+
+互联网知识：
+{web_context or "无"}
+
+请直接生成这个文件的完整内容。
+"""
 
 
-@traceable(name="search_web_tool")
-def traced_search_web(query: str) -> str:
-    return search_web(query)
-
-
-@traceable(name="list_tree_tool")
-def traced_list_tree() -> str:
-    return list_tree()
-
-
-@traceable(name="read_file_tool")
-def traced_read_file(path: str) -> str:
-    return read_file(path)
-
-
-@traceable(name="skill_save")
-def traced_save_skill(goal: str, current_plan: dict, observations: list[str]) -> None:
-    skill = build_skill_from_run(
-        goal=goal,
-        current_plan=current_plan,
-        observations=observations,
+def _generate_file_content(
+    goal: str,
+    file_path: str,
+    file_description: str,
+    plan_summary: str,
+    workspace_tree: str,
+    rag_context: str,
+    web_context: str,
+    model: str,
+    base_url: str,
+    api_key: str,
+) -> str:
+    llm = ChatOllama(
+        model=model,
+        base_url=base_url,
+        api_key=api_key,
+        temperature=0.2,
     )
-    save_skill(skill)
+
+    prompt = _build_file_generation_prompt(
+        goal=goal,
+        file_path=file_path,
+        file_description=file_description,
+        plan_summary=plan_summary,
+        workspace_tree=workspace_tree,
+        rag_context=rag_context,
+        web_context=web_context,
+    )
+
+    resp = llm.invoke([
+        {"role": "system", "content": FILE_GEN_SYSTEM_PROMPT},
+        {"role": "user", "content": prompt},
+    ])
+
+    content = resp.content if isinstance(resp.content, str) else str(resp.content)
+    return content.strip()
 
 
-@traceable(name="agent_run")
-def run_agent(goal: str):
+def _execute_code_plan(
+    state: AgentState,
+    model: str,
+    base_url: str,
+    api_key: str,
+) -> list[str]:
+    created_files: list[str] = []
+
+    if not state.current_plan:
+        logger.warning("No current_plan found")
+        return created_files
+
+    files = state.current_plan.get("files_to_create", [])
+    plan_summary = state.current_plan.get("summary", state.goal)
+
+    for item in files:
+        file_path = item.get("file")
+        file_description = item.get("description", "")
+
+        if not file_path:
+            continue
+
+        logger.info("Generating file content via LLM: %s", file_path)
+
+        workspace_tree = list_tree()
+        content = _generate_file_content(
+            goal=state.goal,
+            file_path=file_path,
+            file_description=file_description,
+            plan_summary=plan_summary,
+            workspace_tree=workspace_tree,
+            rag_context=state.rag_context,
+            web_context=state.web_context,
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+        )
+
+        result = write_file_tool(file_path, content)
+        logger.info("Write file result | path=%s | result=%s", file_path, result)
+
+        if result == "WRITE_OK":
+            created_files.append(file_path)
+            state.observations.append(f"file created: {file_path}")
+        else:
+            state.observations.append(f"file create failed: {file_path} | {result}")
+
+    return created_files
+
+
+def run_agent(goal: str) -> dict:
+    logger.info("智能体运行已启动")
+
     settings = load_settings()
     state = AgentState(goal=goal)
 
-    skill = traced_find_similar_skill(goal)
-    if skill:
-        logger.info("Reusing skill: %s", skill.name)
-        return {
-            "action": "PLAN_CODE",
-            "files_to_create": skill.file_plan,
-            "steps": ["Reused from skill memory"],
-        }
+    intent = route_intent(goal)
+    logger.info("Intent router decision: %s", intent)
 
-    max_steps = 8
+    for step in range(settings.agent.max_steps):
+        logger.info("Agent step %s", step)
 
-    while not state.finished:
-        if state.step_count >= max_steps:
-            logger.warning("Agent reached MAX_STEPS → force finish")
-            break
-
-        logger.info("Agent step %s", state.step_count)
-
-        decision = plan_task(
+        decision = plan_next_step(
             goal=state.goal,
             rag_context=state.rag_context,
             web_context=state.web_context,
@@ -87,63 +177,73 @@ def run_agent(goal: str):
             api_key=settings.model.api_key,
         )
 
-        action = decision.get("action", "PLAN_CODE")
+        action = decision.get("action", "FINISH")
         logger.info("Agent decision: %s", action)
 
+        if action == "LIST_TREE":
+            tree = list_tree()
+            state.observations.append(f"workspace tree:\n{tree}")
+            continue
+
         if action == "SEARCH_RAG":
-            result = traced_search_rag(state.goal)
-            state.rag_context = result
-            state.observations.append("rag searched")
-            state.step_count += 1
+            state.rag_context = search_rag(state.goal)
+            state.observations.append("rag search completed")
             continue
 
         if action == "SEARCH_WEB":
-            result = traced_search_web(state.goal)
-            state.web_context = result
-            state.observations.append("web searched")
-            state.step_count += 1
-            continue
-
-        if action == "LIST_TREE":
-            tree = traced_list_tree()
-            state.observations.append(f"project files:\n{tree[:500]}")
-            state.step_count += 1
-            continue
-
-        if action == "READ_FILE":
-            content = traced_read_file("main.py")
-            state.observations.append(
-                f"file content preview:\n{content[:500]}"
-            )
-            state.step_count += 1
+            state.web_context = search_web(state.goal)
+            state.observations.append("web search completed")
             continue
 
         if action == "PLAN_CODE":
-            if state.current_plan is not None:
-                logger.info("Plan already exists → agent decides to finish")
-                state.finished = True
-                break
+            logger.info("Entering PLAN_CODE phase")
 
-            state.current_plan = decision
-            state.observations.append("plan generated")
-            state.step_count += 1
-            continue
+            workspace_tree = list_tree()
+            state.current_plan = generate_code_plan(
+                goal=state.goal,
+                rag_context=state.rag_context,
+                web_context=state.web_context,
+                workspace_tree=workspace_tree,
+                model=settings.model.model_name,
+                base_url=settings.model.ai_base_url,
+                api_key=settings.model.api_key,
+            )
+
+            state.observations.append(
+                f"code plan generated: {len(state.current_plan.get('files_to_create', []))} files"
+            )
+
+            created_files = _execute_code_plan(
+                state=state,
+                model=settings.model.model_name,
+                base_url=settings.model.ai_base_url,
+                api_key=settings.model.api_key,
+            )
+
+            return {
+                "answer": "DevMate 已完成代码生成",
+                "created_files": created_files,
+                "plan": state.current_plan,
+            }
 
         if action == "FINISH":
-            state.finished = True
-            break
+            logger.info("Agent finish decision reached")
+            return {
+                "answer": "DevMate 已完成任务",
+                "created_files": [],
+                "plan": state.current_plan,
+            }
 
         logger.warning("Unknown action → force finish")
-        break
+        return {
+            "answer": f"未知动作: {action}",
+            "created_files": [],
+            "plan": state.current_plan,
+        }
 
-    if state.current_plan is not None:
-        try:
-            traced_save_skill(
-                goal=state.goal,
-                current_plan=state.current_plan,
-                observations=state.observations,
-            )
-        except Exception:
-            logger.exception("Skill save failed")
-
-    return state.current_plan
+    logger.warning("Agent reached MAX_STEPS")
+    return {
+        "answer": "Agent 达到最大步骤，任务结束",
+        "created_files": [],
+        "plan": state.current_plan,
+    }

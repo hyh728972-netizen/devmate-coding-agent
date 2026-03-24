@@ -21,6 +21,27 @@ class LangSmithSettings(BaseModel):
 
 class SkillsSettings(BaseModel):
     skills_dir: str
+    persist_dir: str = "data/skills"
+
+
+class WorkspaceSettings(BaseModel):
+    root: str
+    auto_create: bool = True
+
+
+class MCPSettings(BaseModel):
+    server_url: str
+    timeout: int = 30
+
+
+class AgentRuntimeSettings(BaseModel):
+    max_steps: int
+    planning_temperature: float
+
+
+class RAGSettings(BaseModel):
+    docs_dir: str
+    persist_dir: str
 
 
 class Settings(BaseModel):
@@ -28,6 +49,10 @@ class Settings(BaseModel):
     search: SearchSettings
     langsmith: LangSmithSettings
     skills: SkillsSettings
+    workspace: WorkspaceSettings
+    mcp: MCPSettings
+    agent: AgentRuntimeSettings
+    rag: RAGSettings
 
 
 def load_settings() -> Settings:
@@ -39,5 +64,11 @@ def load_settings() -> Settings:
 
     with open(config_file, "rb") as f:
         data = tomllib.load(f)
+
+    settings = Settings(**data)
+
+    workspace_path = Path(settings.workspace.root).resolve()
+    if settings.workspace.auto_create:
+        workspace_path.mkdir(parents=True, exist_ok=True)
 
     return Settings(**data)
