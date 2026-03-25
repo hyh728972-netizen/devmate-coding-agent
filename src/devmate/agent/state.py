@@ -6,12 +6,17 @@ from typing import List, Dict, Any
 class AgentState:
     goal: str
 
+    # ⭐⭐⭐ 新增
+    task_type: str = "DEV_TASK"
+
+    step_count: int = 0
+    max_steps: int = 6
+
+    history: List[Dict[str, Any]] = field(default_factory=list)
+
     rag_context: str = ""
     web_context: str = ""
 
-    observations: List[str] = field(default_factory=list)
-
-    current_plan: Dict[str, Any] | None = None
+    generated_files: List[str] = field(default_factory=list)
 
     finished: bool = False
-    step_count: int = 0
