@@ -1,6 +1,7 @@
 import logging
 from pathlib import Path
 
+from devmate.config import load_settings
 from devmate.rag.loader import load_markdown_documents
 from devmate.rag.chunker import split_documents
 from devmate.rag.store import get_vector_store
@@ -9,8 +10,9 @@ logger = logging.getLogger(__name__)
 
 
 def ingest_documents() -> None:
+    settings = load_settings()
     root = Path(__file__).resolve().parents[3]
-    docs_dir = root / "docs"
+    docs_dir = root / settings.rag.docs_dir
 
     logger.info("Docs folder: %s", docs_dir)
 

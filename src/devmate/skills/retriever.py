@@ -1,9 +1,29 @@
-import json
 from pathlib import Path
 from typing import Optional
 
 from devmate.config.settings import load_settings
 from devmate.skills.schema import Skill
+
+
+def _frontmatter_value(markdown: str, key: str) -> str:
+    prefix = f"{key}:"
+    for line in markdown.splitlines():
+        if line.startswith(prefix):
+            return line.removeprefix(prefix).strip().strip('"')
+    return ""
+
+
+def _skill_from_markdown(file: Path) -> Skill:
+    markdown = file.read_text(encoding="utf-8")
+    name = _frontmatter_value(markdown, "name") or file.parent.name
+    description = _frontmatter_value(markdown, "description") or name
+    return Skill(
+        name=name,
+        task_pattern=description,
+        file_plan=[],
+        tool_usage=[],
+        prompt_template=markdown,
+    )
 
 
 def load_all_skills() -> list[Skill]:
@@ -14,10 +34,9 @@ def load_all_skills() -> list[Skill]:
     if not skills_dir.exists():
         return skills
 
-    for file in skills_dir.glob("*.json"):
+    for file in skills_dir.glob("*/SKILL.md"):
         try:
-            data = json.loads(file.read_text(encoding="utf-8"))
-            skills.append(Skill(**data))
+            skills.append(_skill_from_markdown(file))
         except Exception:
             continue
 

@@ -1,59 +1,57 @@
 import logging
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+
+from mcp.server.fastmcp import FastMCP
 
 from devmate.config import load_settings
 from devmate.mcp.tools import TavilySearchTool
-from devmate.mcp.schemas import SearchRequest
 
 logger = logging.getLogger(__name__)
+settings = load_settings()
 
-app = FastAPI(title="DevMate MCP Server")
-
-# 全局 tool 实例
+server = FastMCP(
+    name="DevMate Search MCP Server",
+    host=settings.mcp.host,
+    port=settings.mcp.port,
+    streamable_http_path=settings.mcp.path,
+    stateless_http=True,
+    json_response=True,
+)
 search_tool: TavilySearchTool | None = None
 
 
-def init_search(api_key: str) -> None:
+def _get_search_tool() -> TavilySearchTool:
     global search_tool
-    search_tool = TavilySearchTool(api_key)
+
+    if search_tool is not None:
+        return search_tool
+
+    search_tool = TavilySearchTool(settings.search.tavily_api_key)
+    return search_tool
 
 
-@app.on_event("startup")
-async def startup_event():
-    """
-    ⭐⭐⭐ 在 server 启动时初始化 Tavily tool
-    这是工程评分重点（tool lifecycle management）
-    """
-    settings = load_settings()
-    init_search(settings.search.tavily_api_key)
-    logger.info("Tavily search tool initialized")
+@server.tool(
+    name="search_web",
+    description=(
+        "Search the live web with Tavily for current framework, package, "
+        "API, and product information."
+    ),
+)
+def search_web(query: str) -> list[dict]:
+    """Run Tavily search through the MCP Streamable HTTP server."""
+    if not query.strip():
+        return []
+
+    logger.info("MCP Tavily search called")
+    return _get_search_tool().search(query)
 
 
-@app.post("/mcp/search")
-async def search_web(req: SearchRequest):
-    logger.info("MCP search called")
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
+    server.run(transport="streamable-http")
 
-    if search_tool is None:
-        raise HTTPException(status_code=500, detail="Search tool not initialized")
-
-    try:
-        results = search_tool.search(req.query)
-    except Exception as e:
-        logger.exception("Tavily search failed")
-        raise HTTPException(status_code=500, detail=str(e))
-
-    async def stream():
-        yield str(results)
-
-    return StreamingResponse(stream(), media_type="text/plain")
-
-import uvicorn
 
 if __name__ == "__main__":
-    uvicorn.run(
-        "devmate.mcp.server:app",
-        host="0.0.0.0",
-        port=8001,
-        reload=False,
-    )
+    main()

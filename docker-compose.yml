@@ -3,6 +3,9 @@ services:
   mcp:
     build: .
     command: python -m devmate.mcp.server
+    environment:
+      DEVMATE_MCP_HOST: "0.0.0.0"
+      DEVMATE_MCP_PORT: "8001"
     ports:
       - "8001:8001"
     volumes:
@@ -13,6 +16,8 @@ services:
     command: python main.py
     depends_on:
       - mcp
+    environment:
+      DEVMATE_MCP_SERVER_URL: "http://mcp:8001/mcp"
     volumes:
       - ./workspace:/app/workspace
       - ./data:/app/data

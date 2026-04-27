@@ -1,8 +1,8 @@
 # DevMate Coding Agent
 
 DevMate 是一个 **本地运行的 AI Coding Agent 系统**，  
-具备任务理解、RAG 检索、联网搜索、自动代码生成等完整能力，  
-模拟真实 AI Agent 工业级架构设计。
+当前主执行链路基于 **Deep Agents + LangChain 最新官方范式**，  
+具备工作区编码、RAG 检索、联网搜索、自动代码生成等能力。
 
 该项目适用于：
 
@@ -62,20 +62,15 @@ Agent 可自动判断：
 
 ### Agent 决策循环（ReAct Loop）
 
-Agent Runtime 实现完整推理循环：
-
-- Planner 决策 Action
-- Tool 执行
-- 状态更新
-- 多步推理
+Agent Runtime 当前使用 `deepagents.create_deep_agent` 实现：
 
 支持核心 Action：
 
 SEARCH_RAG
 SEARCH_WEB
-PLAN_CODE
-LIST_TREE
-ANSWER
+内置 planning / todos
+内置 filesystem tools
+内置 subagents
 
 
 ---
@@ -112,7 +107,7 @@ ollama pull nomic-embed-text
 # 启动 MCP 搜索服务
 
 在项目根目录执行：
-uv run --directory src uvicorn devmate.mcp.server:app --port 8001
+uv run --directory src python -m devmate.mcp.server
 
 
 ---
@@ -121,6 +116,9 @@ uv run --directory src uvicorn devmate.mcp.server:app --port 8001
 
 新开一个终端：
 uv run --directory src python -m devmate.agent.executor
+
+当前实现约束见：
+`docs/笔试实现约束.md`
 
 出现：
 请输入你的开发任务需求：

@@ -1,123 +1,174 @@
+import asyncio
 import logging
+import os
+from inspect import isawaitable
+from pathlib import Path
+from uuid import uuid4
 
-from devmate.agent.state import AgentState
-from devmate.agent.router import route_intent
-from devmate.agent.planner import plan_next_step
-from devmate.agent.tools import (
-    search_rag,
-    search_web,
-    list_tree,
-    write_file_tool,
-)
+from deepagents import FilesystemPermission, create_deep_agent
+from deepagents.backends import FilesystemBackend
+from langchain.chat_models import init_chat_model
+from langchain_mcp_adapters.client import MultiServerMCPClient
 
-from langchain_community.chat_models import ChatOllama
+from devmate.agent.prompts import SYSTEM_PROMPT
+from devmate.agent.tools import search_rag
 from devmate.config.settings import load_settings
+from devmate.skills.builder import build_skill_from_run
+from devmate.skills.store import save_skill
 
 
 logger = logging.getLogger(__name__)
 settings = load_settings()
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _to_virtual_path(path: str) -> str:
+    normalized = path.replace("\\", "/").lstrip("./")
+    return f"/{normalized}".rstrip("/")
+
+
+def _configure_tracing() -> None:
+    if settings.langsmith.langchain_tracing_v2:
+        os.environ["LANGSMITH_TRACING"] = "true"
+    if settings.langsmith.langchain_api_key:
+        os.environ["LANGSMITH_API_KEY"] = settings.langsmith.langchain_api_key
+    if settings.langsmith.project:
+        os.environ["LANGSMITH_PROJECT"] = settings.langsmith.project
+
+
+def _model_identifier() -> str:
+    provider_prefix = f"{settings.model.model_provider}:"
+    if settings.model.model_name.startswith(provider_prefix):
+        return settings.model.model_name
+    return f"{provider_prefix}{settings.model.model_name}"
 
 
 def get_llm():
-    return ChatOllama(
-        model=settings.model.model_name,
-        base_url=settings.model.ai_base_url
+    model_kwargs = {
+        "model": _model_identifier(),
+        "temperature": settings.agent.planning_temperature,
+    }
+
+    if settings.model.ai_base_url:
+        model_kwargs["base_url"] = settings.model.ai_base_url
+    if settings.model.api_key:
+        model_kwargs["api_key"] = settings.model.api_key
+
+    return init_chat_model(**model_kwargs)
+
+
+async def _load_mcp_tools() -> list:
+    client = MultiServerMCPClient(
+        {
+            "devmate-search": {
+                "url": settings.mcp.server_url,
+                "transport": "streamable_http",
+            },
+        }
+    )
+    return await client.get_tools()
+
+
+def _get_tools() -> list:
+    return [search_rag, *asyncio.run(_load_mcp_tools())]
+
+
+def _invoke_agent(agent, messages: dict, config: dict) -> dict:
+    result = agent.invoke(messages, config=config)
+    if isawaitable(result):
+        return asyncio.run(result)
+    return result
+
+
+def _build_agent():
+    docs_path = f"{_to_virtual_path(settings.rag.docs_dir)}/**"
+    skills_path = _to_virtual_path(settings.skills.skills_dir)
+    workspace_path = f"{_to_virtual_path(settings.workspace.root)}/**"
+
+    backend = FilesystemBackend(
+        root_dir=str(PROJECT_ROOT),
+        virtual_mode=True,
+    )
+    permissions = [
+        FilesystemPermission(
+            operations=["read"],
+            paths=[docs_path, f"{skills_path}/**", workspace_path],
+            mode="allow",
+        ),
+        FilesystemPermission(
+            operations=["write"],
+            paths=[workspace_path],
+            mode="allow",
+        ),
+        FilesystemPermission(
+            operations=["read", "write"],
+            paths=["/**"],
+            mode="deny",
+        ),
+    ]
+
+    return create_deep_agent(
+        model=get_llm(),
+        tools=_get_tools(),
+        system_prompt=SYSTEM_PROMPT,
+        backend=backend,
+        permissions=permissions,
+        skills=[skills_path],
+        name="devmate-coding-agent",
     )
 
 
-def run_agent(goal: str):
+def _extract_text(result: dict) -> str:
+    messages = result.get("messages", [])
+    if not messages:
+        return ""
+
+    for message in reversed(messages):
+        content = getattr(message, "content", None)
+        if content is None and isinstance(message, dict):
+            content = message.get("content")
+
+        if isinstance(content, str) and content.strip():
+            return content
+
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    parts.append(item.get("text", ""))
+                else:
+                    parts.append(str(item))
+            text = "\n".join(part for part in parts if part)
+            if text.strip():
+                return text
+
+    return str(messages[-1])
+
+
+def run_agent(goal: str, thread_id: str | None = None) -> dict:
+    _configure_tracing()
 
     logger.info("智能体运行已启动")
-
-    llm = get_llm()
-
-    state = AgentState(goal=goal)
-
-    # ⭐ intent router
-    state.task_type = route_intent(goal)
-
-    logger.info("Intent router decision: %s", state.task_type)
-
-    while not state.finished and state.step_count < state.max_steps:
-
-        logger.info("Agent step %s", state.step_count)
-
-        action = plan_next_step(state, llm)
-
-        logger.info("Agent decision: %s", action)
-
-        # ⭐⭐⭐⭐⭐ LOCAL QA
-        if action == "SEARCH_RAG":
-
-            state.rag_context = search_rag(state.goal)
-
-            state.history.append({"action": "SEARCH_RAG"})
-            state.step_count += 1
-            continue
-
-        # ⭐⭐⭐⭐⭐ WEB QA
-        if action == "SEARCH_WEB":
-
-            state.web_context = search_web(state.goal)
-
-            state.history.append({"action": "SEARCH_WEB"})
-            state.step_count += 1
-            continue
-
-        # ⭐⭐⭐⭐⭐ 工程工具
-        if action == "LIST_TREE":
-
-            tree = list_tree()
-
-            state.history.append({"action": "LIST_TREE", "tree": tree})
-            state.step_count += 1
-            continue
-
-        # ⭐⭐⭐⭐⭐ Coding
-        if action == "PLAN_CODE":
-
-            logger.info("Entering PLAN_CODE phase")
-
-            fake_files = [
-                "./app/main.py",
-                "./config/settings.py",
-                "./models/user.py",
-                "./routes/auth.py",
-                "./routes/api.py",
+    agent = _build_agent()
+    result = _invoke_agent(
+        agent,
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": goal,
+                }
             ]
-
-            for f in fake_files:
-
-                logger.info("Generating file content via LLM: %s", f)
-
-                content = llm.invoke(f"生成 {f} 文件代码").content
-
-                result = write_file_tool(f, content)
-
-                logger.info("Write file result | path=%s | result=%s", f, result)
-
-            state.finished = True
-            return {"answer": "代码生成完成"}
-
-        # ⭐⭐⭐⭐⭐ 最终回答
-        if action == "ANSWER":
-
-            answer_prompt = f"""
-请基于以下信息回答用户问题
-
-问题:
-{state.goal}
-
-本地知识:
-{state.rag_context}
-
-网络知识:
-{state.web_context}
-"""
-
-            answer = llm.invoke(answer_prompt).content
-
-            state.finished = True
-            return {"answer": answer}
-
-    return {"answer": "Agent 未完成任务"}
+        },
+        config={
+            "configurable": {
+                "thread_id": thread_id or str(uuid4()),
+            }
+        },
+    )
+    answer = _extract_text(result)
+    try:
+        save_skill(build_skill_from_run(goal, None, [answer]))
+    except Exception:
+        logger.exception("Failed to save reusable skill")
+    return {"answer": answer, "result": result}
