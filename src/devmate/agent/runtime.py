@@ -11,9 +11,11 @@ from langchain.chat_models import init_chat_model
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from devmate.agent.prompts import SYSTEM_PROMPT
+from devmate.agent.router import route_intent
 from devmate.agent.tools import search_rag
 from devmate.config.settings import load_settings
 from devmate.skills.builder import build_skill_from_run
+from devmate.skills.retriever import find_similar_skill
 from devmate.skills.store import save_skill
 
 
@@ -28,6 +30,7 @@ def _to_virtual_path(path: str) -> str:
 
 
 def _configure_tracing() -> None:
+    os.environ["NO_PROXY"] = "localhost,127.0.0.1"
     if settings.langsmith.langchain_tracing_v2:
         os.environ["LANGSMITH_TRACING"] = "true"
     if settings.langsmith.langchain_api_key:
@@ -36,16 +39,10 @@ def _configure_tracing() -> None:
         os.environ["LANGSMITH_PROJECT"] = settings.langsmith.project
 
 
-def _model_identifier() -> str:
-    provider_prefix = f"{settings.model.model_provider}:"
-    if settings.model.model_name.startswith(provider_prefix):
-        return settings.model.model_name
-    return f"{provider_prefix}{settings.model.model_name}"
-
-
 def get_llm():
+    model_id = f"{settings.model.model_provider}:{settings.model.model_name}"
     model_kwargs = {
-        "model": _model_identifier(),
+        "model": model_id,
         "temperature": settings.agent.planning_temperature,
     }
 
@@ -145,18 +142,37 @@ def _extract_text(result: dict) -> str:
     return str(messages[-1])
 
 
+def _build_user_message(goal: str) -> str:
+    matched_skill = find_similar_skill(goal)
+    if matched_skill is None:
+        return goal
+
+    logger.info("Matched reusable skill: %s", matched_skill.name)
+    skill_context = (
+        "[Relevant Skill Context]\n"
+        f"{matched_skill.prompt_template}\n"
+        "[End of Skill Context]\n\n"
+        f"{goal}"
+    )
+    return skill_context
+
+
 def run_agent(goal: str, thread_id: str | None = None) -> dict:
     _configure_tracing()
 
+    task_type = route_intent(goal)
+    logger.info("Intent routing result: goal='%s' → task_type='%s'", goal, task_type)
+
     logger.info("智能体运行已启动")
     agent = _build_agent()
+    user_message = _build_user_message(goal)
     result = _invoke_agent(
         agent,
         {
             "messages": [
                 {
                     "role": "user",
-                    "content": goal,
+                    "content": user_message,
                 }
             ]
         },
@@ -171,4 +187,4 @@ def run_agent(goal: str, thread_id: str | None = None) -> dict:
         save_skill(build_skill_from_run(goal, None, [answer]))
     except Exception:
         logger.exception("Failed to save reusable skill")
-    return {"answer": answer, "result": result}
+    return {"answer": answer, "result": result, "task_type": task_type}

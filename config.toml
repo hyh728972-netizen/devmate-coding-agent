@@ -1,11 +1,11 @@
 # DevMate 配置文件
 
 [model]
-model_provider = "ollama"
-ai_base_url = "http://localhost:11434"
-api_key = "ollama"
-model_name = "qwen2.5:7b-instruct"
-embedding_model_name = "nomic-embed-text"
+model_provider = "openai"
+ai_base_url = "https://open.bigmodel.cn/api/paas/v4"
+api_key = ""
+model_name = "glm-4.6"
+embedding_model_name = "embedding-3"
 
 [search]
 tavily_api_key = ""
@@ -30,7 +30,7 @@ port = 8001
 path = "/mcp"
 
 [agent]
-max_steps = 8
+max_steps = 15
 planning_temperature = 0.2
 
 [rag]
